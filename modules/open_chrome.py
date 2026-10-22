@@ -1,0 +1,74 @@
+'''
+Author:     Seraj Khan
+LinkedIn:   https://www.linkedin.com/in/its-seraj/
+GitHub:     https://github.com/its-seraj
+'''
+
+import os
+from modules.helpers import make_directories
+from config.settings import run_in_background, stealth_mode, disable_extensions, safe_mode, chrome_profile_path, file_name, failed_file_name, logs_folder_path, generated_resume_path
+from config.questions import default_resume_path
+if stealth_mode:
+    import undetected_chromedriver as uc
+else: 
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    # from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.support.ui import WebDriverWait
+from modules.helpers import find_default_profile_directory, critical_error_log, print_lg
+
+try:
+    make_directories([file_name,failed_file_name,logs_folder_path+"/screenshots",default_resume_path,generated_resume_path+"/temp"])
+
+    # Set up WebDriver with Chrome Profile
+    options = uc.ChromeOptions() if stealth_mode else Options()
+    if run_in_background:   options.add_argument("--headless")
+    if disable_extensions:  options.add_argument("--disable-extensions")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    if not stealth_mode:
+        try:
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option("useAutomationExtension", False)
+        except Exception:
+            pass
+
+    print_lg("IF YOU HAVE MORE THAN 10 TABS OPENED, PLEASE CLOSE OR BOOKMARK THEM! Or it's highly likely that application will just open browser and not do anything!")
+    if safe_mode: 
+        print_lg("SAFE MODE: Will login with a guest profile, browsing history/session will not be saved in the browser!")
+    else:
+        if chrome_profile_path and str(chrome_profile_path).strip():
+            profile_dir = os.path.abspath(str(chrome_profile_path).strip())
+            os.makedirs(profile_dir, exist_ok=True)
+        else:
+            profile_dir = find_default_profile_directory()
+
+        if profile_dir:
+            options.add_argument(f"--user-data-dir={profile_dir}")
+            options.add_argument("--profile-directory=Default")
+            print_lg(f"Persistent Chrome profile enabled at: {profile_dir}")
+        else:
+            print_lg("Default profile directory not found. Logging in with a guest profile, Web history will not be saved!")
+    if stealth_mode:
+        # try: 
+        #     driver = uc.Chrome(driver_executable_path="C:\\Program Files\\Google\\Chrome\\chromedriver-win64\\chromedriver.exe", options=options)
+        # except (FileNotFoundError, PermissionError) as e: 
+        #     print_lg("(Undetected Mode) Got '{}' when using pre-installed ChromeDriver.".format(type(e).__name__)) 
+            print_lg("Downloading Chrome Driver... This may take some time. Undetected mode requires download every run!")
+            driver = uc.Chrome(options=options)
+    else: driver = webdriver.Chrome(options=options) #, service=Service(executable_path="C:\\Program Files\\Google\\Chrome\\chromedriver-win64\\chromedriver.exe"))
+    driver.maximize_window()
+    wait = WebDriverWait(driver, 5)
+    actions = ActionChains(driver)
+except Exception as e:
+    msg = 'Seems like either... \n\n1. Chrome is already running. \nA. Close all Chrome windows and try again. \n\n2. Google Chrome or Chromedriver is out dated. \nA. Update browser and Chromedriver (You can run "windows-setup.bat" in /setup folder for Windows PC to update Chromedriver)! \n\n3. If error occurred when using "stealth_mode", try reinstalling undetected-chromedriver. \nA. Open a terminal and use commands "pip uninstall undetected-chromedriver" and "pip install undetected-chromedriver". \n\n\nIf issue persists, try Safe Mode. Set, safe_mode = True in config/settings.py \n\nPlease check GitHub discussions/support for solutions https://github.com/its-seraj/Auto-Job-Apply-LinkedIn'
+    if isinstance(e,TimeoutError): msg = "Couldn't download Chrome-driver. Set stealth_mode = False in config!"
+    print_lg(msg)
+    critical_error_log("In Opening Chrome", e)
+    from pyautogui import alert
+    alert(msg, "Error in opening chrome")
+    try: driver.quit()
+    except NameError: exit()
+    

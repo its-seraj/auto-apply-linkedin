@@ -1,0 +1,6 @@
+selenium
+pyautogui
+google-generativeai
+openai
+PyPDF2
+undetected-chromedriver

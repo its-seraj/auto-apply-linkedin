@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.env
+.DS_Store
+logs/
+all excels/
+all resumes/
+# config/secrets.py  <-- commented out to allow user to push template, but user has real keys in it. 
+# Re-reading: User said "everything update with my and then push".
+# Usually we don't push secrets. 
+# But if I exclude it, the repo won't work for cloning unless they have a template.
+# The original repo had secrets.py ignored.
+config/secrets.py
+config/personals.py
+chrome_profile/
+chrome_profile*
+*.log
+*.pdf
