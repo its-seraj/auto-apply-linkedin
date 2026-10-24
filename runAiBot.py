@@ -1124,7 +1124,7 @@ def safe_fill_input(driver: WebDriver, element: WebElement, value: str):
         pass
 
 
-def wait_for_modal_ready(driver: WebDriver, timeout: float = 12.0) -> WebElement | None:
+def wait_for_modal_ready(driver: WebDriver, timeout: float = 8.0) -> WebElement | None:
     """Waits for Easy Apply modal to finish loading GraphQL dynamic steps (spinners vanish, buttons ready)."""
     start = datetime.now()
     modal = None
@@ -1143,13 +1143,37 @@ def wait_for_modal_ready(driver: WebDriver, timeout: float = 12.0) -> WebElement
                     return modal
         except Exception:
             pass
-        sleep(0.3)
+        sleep(0.05)
     return modal
 
 
+def wait_for_submit_ready(driver: WebDriver, timeout: float = 6.0) -> WebElement | None:
+    """Waits for the final review/submit page to be fully loaded (Submit application button visible)."""
+    start = datetime.now()
+    while (datetime.now() - start).total_seconds() < timeout:
+        for sub_xpath in [
+            "//dialog//footer//button[contains(., 'Submit application') or contains(@aria-label, 'Submit application') or .//span[normalize-space()='Submit application']]",
+            "//button[contains(., 'Submit application') or contains(@aria-label, 'Submit application') or .//span[normalize-space()='Submit application']]",
+        ]:
+            try:
+                for btn in driver.find_elements(By.XPATH, sub_xpath):
+                    if btn.is_displayed():
+                        try:
+                            modal = driver.find_element(By.XPATH, "//dialog[@open] | //div[contains(@class, 'jobs-easy-apply-modal')] | //div[@role='dialog']")
+                            return modal
+                        except Exception:
+                            return driver
+            except Exception:
+                pass
+        sleep(0.05)
+    return None
+
+
+
 def find_and_click_next_or_review(driver: WebDriver, modal: WebElement) -> tuple[bool, str]:
-    """Finds and clicks Next, Review, or Submit button within the Easy Apply modal footer."""
-    modal = wait_for_modal_ready(driver, 8.0) or modal
+    """Finds and clicks Next, Review, or Submit button within the Easy Apply modal footer immediately."""
+    if not modal:
+        modal = wait_for_modal_ready(driver, 4.0)
     if not modal:
         return False, "no_modal"
 
@@ -1175,7 +1199,6 @@ def find_and_click_next_or_review(driver: WebDriver, modal: WebElement) -> tuple
                         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
                     except Exception:
                         pass
-                    sleep(0.2)
                     clicked = False
                     try:
                         btn.click()
@@ -1192,7 +1215,6 @@ def find_and_click_next_or_review(driver: WebDriver, modal: WebElement) -> tuple
                                 pass
                     if clicked:
                         print_lg(f"Clicked '{btn_type}' button in Easy Apply modal")
-                        sleep(1.5)
                         return True, btn_type
         except Exception:
             continue
@@ -1851,14 +1873,132 @@ def external_apply(pagination_element: WebElement, job_id: str, job_link: str, r
 
 def follow_company(modal: WebDriver = driver) -> None:
     '''
-    Function to follow or un-follow easy applied companies based om `follow_companies`
+    Function to follow or un-follow easy applied companies based on `follow_companies`.
+    Default setting is follow_companies = False (uncheck the follow box).
     '''
+    global follow_companies
     try:
-        follow_checkbox_input = try_xp(modal, ".//input[@id='follow-company-checkbox' and @type='checkbox']", False)
-        if follow_checkbox_input and follow_checkbox_input.is_selected() != follow_companies:
-            try_xp(modal, ".//label[@for='follow-company-checkbox']")
+        want_follow = bool(follow_companies)
+        
+        # 1. Multi-strategy JavaScript uncheck: searches all inputs, labels, and artdeco containers
+        js_uncheck = """
+            var wantFollow = arguments[0];
+            var res = { status: 'not_found' };
+
+            // Priority 0: Modern LinkedIn div[role="checkbox"] container
+            var roleCheckbox = document.querySelector('div[role="checkbox"][aria-label*="Follow" i], [role="checkbox"][aria-label*="follow" i]');
+            if (roleCheckbox) {
+                targetLbl = roleCheckbox;
+                targetInp = roleCheckbox.querySelector('input[type="checkbox"]');
+            }
+
+            // Find all potential checkboxes
+            if (!targetInp || !targetLbl) {
+                var allInps = document.querySelectorAll('input[type="checkbox"]');
+                for (var i = 0; i < allInps.length; i++) {
+                    var inp = allInps[i];
+                    var id = (inp.id || '').toLowerCase();
+                    var name = (inp.name || '').toLowerCase();
+                    if (id.includes('follow') || name.includes('follow')) {
+                        targetInp = inp;
+                        if (inp.id) {
+                            targetLbl = document.querySelector('label[for="' + inp.id + '"]');
+                        }
+                        break;
+                    }
+                }
+            // Search by label/span text
+            if (!targetInp || !targetLbl) {
+                var allEls = document.querySelectorAll('label, div.artdeco-checkbox, div[role="checkbox"], span');
+                for (var j = 0; j < allEls.length; j++) {
+                    var el = allEls[j];
+                    var txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    if (txt.includes('follow') && (txt.includes('stay up to date') || txt.includes('page') || txt.includes('updates'))) {
+                        if (el.tagName.toLowerCase() === 'label') {
+                            targetLbl = el;
+                        } else {
+                            targetLbl = el.querySelector('label') || el;
+                        }
+                        if (!targetInp) {
+                            var forId = targetLbl ? targetLbl.getAttribute('for') : null;
+                            if (forId) targetInp = document.getElementById(forId);
+                            if (!targetInp) targetInp = el.querySelector('input[type="checkbox"]') || (el.parentElement ? el.parentElement.querySelector('input[type="checkbox"]') : null);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (targetInp || targetLbl) {
+                var isChecked = targetInp ? targetInp.checked : true;
+                if (targetLbl && !targetInp) {
+                    var aria = targetLbl.getAttribute('aria-checked');
+                    if (aria === 'false') isChecked = false;
+                }
+
+                if (isChecked !== wantFollow) {
+                    var clickTarget = targetLbl || targetInp;
+                    clickTarget.scrollIntoView({block: 'center'});
+                    clickTarget.click();
+
+                    // If native input still hasn't flipped, click native input directly
+                    if (targetInp && targetInp.checked !== wantFollow) {
+                        targetInp.click();
+                    }
+
+                    // Strict enforcement: if we want it unchecked and it's still checked, force uncheck
+                    if (!wantFollow && targetInp && targetInp.checked) {
+                        targetInp.checked = false;
+                        targetInp.dispatchEvent(new Event('input', { bubbles: true }));
+                        targetInp.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+
+                    res.status = 'toggled';
+                    res.before = isChecked;
+                    res.after = targetInp ? targetInp.checked : !wantFollow;
+                    return res;
+                } else {
+                    res.status = 'already_' + (wantFollow ? 'checked' : 'unchecked');
+                    return res;
+                }
+            }
+
+            return res;
+        """
+        result = driver.execute_script(js_uncheck, want_follow)
+        if isinstance(result, dict):
+            status = result.get('status', '')
+            if status == 'toggled':
+                print_lg(f"Successfully unchecked 'Follow company' checkbox (was checked, now unchecked).")
+                return
+            elif status == 'already_unchecked':
+                print_lg("'Follow company' checkbox is already unchecked.")
+                return
+            else:
+                print_lg(f"Follow company checkbox status: {status}")
+
+        # 2. Selenium fallback search
+        root = modal if modal else driver
+        for lx in [
+            ".//label[contains(., 'Follow') and (contains(., 'stay up to date') or contains(., 'page'))]",
+            "//dialog//label[contains(., 'Follow') and (contains(., 'stay up to date') or contains(., 'page'))]",
+            ".//label[contains(@for, 'follow-company')]",
+            "//dialog//label[contains(@for, 'follow-company')]",
+            "//label[contains(., 'Follow')]",
+        ]:
+            try:
+                for lbl in root.find_elements(By.XPATH, lx):
+                    if lbl.is_displayed():
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", lbl)
+                        lbl.click()
+                        print_lg(f"Clicked follow company label via Selenium fallback ({lx})")
+                        return
+            except Exception:
+                pass
     except Exception as e:
         print_lg("Failed to update follow companies checkbox!", e)
+
+
     
 
 
@@ -2255,9 +2395,8 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                                     driver.execute_script("arguments[0].click();", easy_btn)
                                 except Exception:
                                     easy_btn.click()
-                                buffer(1.5)
 
-                                modal = wait_for_modal_ready(driver, 10.0)
+                                modal = wait_for_modal_ready(driver, 8.0)
                                 if not modal:
                                     for _ in range(8):
                                         try:
@@ -2267,7 +2406,7 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                                                 break
                                         except Exception:
                                             pass
-                                        sleep(0.5)
+                                        sleep(0.1)
 
                                 if not modal:
                                     raise Exception("Could not find Easy Apply modal dialog after clicking apply button")
@@ -2280,20 +2419,20 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                                     while next_counter < 15:
                                         next_counter += 1
 
-                                        # Wait for current modal page to be fully loaded and spinner to vanish
-                                        modal = wait_for_modal_ready(driver, 8.0) or modal
-
                                         questions_list = answer_questions(modal, questions_list, work_location, job_description=description)
                                         if useNewResume and not uploaded:
                                             uploaded, resume = upload_resume(modal, default_resume_path)
 
-                                        buffer(click_gap)
                                         clicked, btn_type = find_and_click_next_or_review(driver, modal)
                                         if not clicked:
                                             break
                                         if btn_type in ["review", "submit"]:
                                             break
-                                        buffer(click_gap)
+
+                                        # Fast-wait for next step modal to be ready (50ms polling)
+                                        modal = wait_for_modal_ready(driver, 6.0)
+                                        if not modal:
+                                            break
 
                                     if next_counter >= 15:
                                         if pause_at_failed_question and not auto_submit:
@@ -2310,7 +2449,12 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                                     if questions_list and errored != "stuck": 
                                         print_lg("Answered the following questions...", questions_list)
                                         print("\n\n" + "\n".join(str(question) for question in questions_list) + "\n\n")
-                                    modal = wait_for_modal_ready(driver, 8.0) or modal
+                                    # Wait for the Review / Submit screen to be fully loaded!
+                                    modal = wait_for_submit_ready(driver, 6.0) or wait_for_modal_ready(driver, 6.0) or modal
+                                    try:
+                                        follow_company(modal or driver)
+                                    except Exception as e:
+                                        print_lg("Error updating follow company checkbox:", e)
                                     cur_pause_before_submit = pause_before_submit and not auto_submit
                                     if errored != "stuck" and cur_pause_before_submit:
                                         decision = pyautogui.confirm('1. Please verify your information.\n2. If you edited something, please return to this final screen.\n3. DO NOT CLICK "Submit Application".\n\n\n\n\nYou can turn off "Pause before submit" setting in config.py\nTo TEMPORARILY disable pausing, click "Disable Pause"', "Confirm your information",["Disable Pause", "Discard Application", "Submit Application"])
@@ -2320,7 +2464,6 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                                         follow_company(modal or driver)
                                     except Exception:
                                         pass
-                                    buffer(1.5)
                                     submit_clicked = False
                                     for sub_xpath in [
                                         ".//button[contains(., 'Submit application') or contains(@aria-label, 'Submit application') or .//span[normalize-space()='Submit application']]",
