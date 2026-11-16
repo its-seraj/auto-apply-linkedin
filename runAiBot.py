@@ -1022,6 +1022,40 @@ def clean_question_text(raw: str) -> str:
 def extract_question_label(element: WebElement, default: str = "Unknown") -> str:
     """Extracts a clean label/title for a given form element or container."""
     try:
+        # Fast JS extraction: evaluates aria-label, aria-labelledby, for="id", and nested labels in 1 browser call
+        js_label = driver.execute_script("""
+            const el = arguments[0];
+            if (!el) return "";
+            let aria = el.getAttribute("aria-label");
+            if (aria && aria.trim().length > 1) return aria.trim();
+
+            let ariaBy = el.getAttribute("aria-labelledby");
+            if (ariaBy) {
+                for (let id of ariaBy.split(/\\s+/)) {
+                    let target = document.getElementById(id);
+                    if (target && target.innerText && target.innerText.trim()) return target.innerText.trim();
+                }
+            }
+
+            if (el.id) {
+                let lbl = document.querySelector('label[for="' + el.id + '"]');
+                if (lbl && lbl.innerText && lbl.innerText.trim()) return lbl.innerText.trim();
+            }
+
+            let nested = el.querySelector('label, legend, span.jobs-easy-apply-form-element__label, span[class*="label"], span[class*="title"], span[class*="t-14"]');
+            if (nested && nested.innerText && nested.innerText.trim()) return nested.innerText.trim();
+
+            return "";
+        """, element)
+
+        if js_label:
+            clean = clean_question_text(js_label)
+            if clean:
+                return clean
+    except Exception:
+        pass
+
+    try:
         # 1. aria-label on the element
         aria = element.get_attribute("aria-label")
         if aria and len(aria.strip()) > 1:
@@ -1293,60 +1327,50 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
     Supports native <select> dropdowns, custom comboboxes, radio groups, checkboxes, text/number inputs, and textareas.
     Uses rules for common personal info, and seamlessly invokes LLM for custom questions.
     """
-    # 1. Discover all form containers using modern LinkedIn component attributes
-    container_xpaths = [
-        ".//div[@data-test-form-element]",
-        ".//div[contains(@class, 'jobs-easy-apply-form-element')]",
-        ".//div[contains(@class, 'fb-dash-form-element')]",
-        ".//div[contains(@class, 'jobs-easy-apply-form-section__grouping')]",
-        ".//div[@data-test-single-line-text-form-component]",
-        ".//div[@data-test-text-entity-list-form-component]",
-        ".//div[@data-test-form-builder-radio-button-form-component]",
-        ".//div[@data-test-multiline-text-form-component]",
-        ".//div[contains(@class, 'artdeco-text-input--container')]",
-        ".//div[contains(@class, 'fb-form-element')]",
-    ]
+    # 1. Discover all form containers using modern LinkedIn component attributes in a single fast query
+    container_xpath = (
+        ".//div[@data-test-form-element or "
+        "contains(@class, 'jobs-easy-apply-form-element') or "
+        "contains(@class, 'fb-dash-form-element') or "
+        "contains(@class, 'jobs-easy-apply-form-section__grouping') or "
+        "@data-test-single-line-text-form-component or "
+        "@data-test-text-entity-list-form-component or "
+        "@data-test-form-builder-radio-button-form-component or "
+        "@data-test-multiline-text-form-component or "
+        "contains(@class, 'artdeco-text-input--container') or "
+        "contains(@class, 'fb-form-element')]"
+    )
 
     all_questions = []
     seen_elements = set()
-    for xpath in container_xpaths:
-        try:
-            for el in modal.find_elements(By.XPATH, xpath):
-                try:
-                    eid = el.id
-                except Exception:
-                    eid = id(el)
-                if eid not in seen_elements:
-                    seen_elements.add(eid)
-                    all_questions.append(el)
-        except Exception:
-            pass
+    try:
+        for el in modal.find_elements(By.XPATH, container_xpath):
+            try:
+                eid = el.id
+            except Exception:
+                eid = id(el)
+            if eid not in seen_elements:
+                seen_elements.add(eid)
+                all_questions.append(el)
+    except Exception:
+        pass
 
     # 2. Comprehensive fallback: scan for interactive controls directly to ensure nothing is missed
-    direct_controls = modal.find_elements(
-        By.XPATH,
-        ".//select | .//fieldset | .//textarea | .//input[not(@type) or @type='text' or @type='number' or @type='tel' or @type='email' or @type='checkbox']"
-    )
-    for ctrl in direct_controls:
-        try:
-            inside_known = False
-            for q in all_questions:
-                try:
-                    if q == ctrl:
-                        inside_known = True
-                        break
-                except Exception:
-                    pass
-            if not inside_known:
-                try:
-                    cid = ctrl.id
-                except Exception:
-                    cid = id(ctrl)
-                if cid not in seen_elements:
-                    seen_elements.add(cid)
-                    all_questions.append(ctrl)
-        except Exception:
-            pass
+    try:
+        direct_controls = modal.find_elements(
+            By.XPATH,
+            ".//select | .//fieldset | .//textarea | .//input[not(@type) or @type='text' or @type='number' or @type='tel' or @type='email' or @type='checkbox']"
+        )
+        for ctrl in direct_controls:
+            try:
+                cid = ctrl.id
+            except Exception:
+                cid = id(ctrl)
+            if cid not in seen_elements:
+                seen_elements.add(cid)
+                all_questions.append(ctrl)
+    except Exception:
+        pass
 
     handled_controls = set()
 
@@ -1368,14 +1392,6 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     continue
                 handled_controls.add(ctrl_id)
 
-                try:
-                    driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", select_el)
-                    sleep(0.1)
-                except Exception:
-                    pass
-
-                label_org = extract_question_label(Question, "Select option")
-                label = label_org.lower()
                 sel_obj = Select(select_el)
 
                 try:
@@ -1383,17 +1399,39 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                 except Exception:
                     selected_option = ""
 
-                options_text = [
-                    opt.text.strip()
-                    for opt in sel_obj.options
-                    if opt.text.strip() and opt.text.strip().lower() not in ["select an option", "select", "choose an option", "none"]
-                ]
-                options_str = "".join([f' "{o}",' for o in options_text])
                 prev_answer = selected_option
-
                 needs_answer = overwrite_previous_answers or not selected_option or selected_option.lower() in ["select an option", "select", "choose an option"]
 
-                if needs_answer and options_text:
+                # Fast skip if dropdown is already answered and overwrite is disabled
+                if not needs_answer:
+                    label_org = extract_question_label(Question, "Select option")
+                    questions_list.add((label_org, prev_answer, "select", prev_answer))
+                    continue
+
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", select_el)
+                except Exception:
+                    pass
+
+                label_org = extract_question_label(Question, "Select option")
+                label = label_org.lower()
+
+                # Fast JS extraction of options array (1ms instead of 200+ HTTP calls)
+                try:
+                    options_text = driver.execute_script(
+                        "return Array.from(arguments[0].options).map(o => (o.text || '').trim()).filter(t => t && !['select an option', 'select', 'choose an option', 'none'].includes(t.toLowerCase()));",
+                        select_el
+                    ) or []
+                except Exception:
+                    options_text = [
+                        opt.text.strip()
+                        for opt in sel_obj.options
+                        if opt.text.strip() and opt.text.strip().lower() not in ["select an option", "select", "choose an option", "none"]
+                    ]
+
+                options_str = "".join([f' "{o}",' for o in options_text])
+
+                if options_text:
                     answer = ""
                     # Fast paths
                     if 'email' in label:
@@ -1488,18 +1526,45 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     continue
                 handled_controls.add(ctrl_id)
 
+                # Fast check if already selected
+                prev_answer = None
                 try:
-                    driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", radio)
-                    sleep(0.1)
+                    js_radio_status = driver.execute_script("""
+                        const fieldset = arguments[0];
+                        const inputs = Array.from(fieldset.querySelectorAll('input[type="radio"]'));
+                        for (let inp of inputs) {
+                            if (inp.checked) {
+                                let text = "";
+                                if (inp.id) {
+                                    const lbl = fieldset.querySelector('label[for="' + inp.id + '"]') || document.querySelector('label[for="' + inp.id + '"]');
+                                    if (lbl) text = lbl.innerText.trim();
+                                }
+                                if (!text) {
+                                    const parentLbl = inp.closest('label');
+                                    if (parentLbl) text = parentLbl.innerText.trim();
+                                }
+                                if (!text) text = inp.value || "Selected";
+                                return text;
+                            }
+                        }
+                        return null;
+                    """, radio)
+                    if js_radio_status:
+                        prev_answer = js_radio_status
                 except Exception:
                     pass
+
+                needs_answer = overwrite_previous_answers or (prev_answer is None)
+                if not needs_answer and prev_answer:
+                    label_org = extract_question_label(radio, "Radio Question")
+                    questions_list.add((f'{label_org}', prev_answer, "radio", prev_answer))
+                    continue
 
                 label_org = extract_question_label(radio, "Radio Question")
                 label = label_org.lower()
 
                 radio_inputs = radio.find_elements(By.XPATH, ".//input[@type='radio']")
                 options_info = []
-                prev_answer = None
 
                 for r_inp in radio_inputs:
                     r_id = r_inp.get_attribute("id")
@@ -1606,42 +1671,47 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     continue
                 handled_controls.add(ctrl_id)
 
-                label_org = extract_question_label(Question, "Textarea Question")
-                label = label_org.lower()
-
                 prev_answer = text_area.get_attribute("value") or ""
                 if is_placeholder_answer(prev_answer):
                     prev_answer = ""
 
                 needs_answer = overwrite_previous_answers or not prev_answer
 
-                if needs_answer:
-                    answer = ""
-                    if 'summary' in label:
-                        answer = linkedin_summary
-                    elif 'cover' in label:
-                        answer = cover_letter
-                    else:
-                        answer = answer_resume_specific_question(label_org, "textarea")
+                # Fast skip if textarea is already filled
+                if not needs_answer:
+                    label_org = extract_question_label(Question, "Textarea Question")
+                    questions_list.add((label_org.lower(), prev_answer, "textarea", prev_answer))
+                    continue
 
-                    # If empty, USE LLM!
-                    if not answer and use_AI and aiClient:
-                        try:
-                            ai_resp = ask_llm(
-                                question=label_org,
-                                question_type='textarea',
-                                job_description=job_description
-                            )
-                            if ai_resp:
-                                answer = ai_resp
-                                print_lg(f'AI answered textarea question "{label_org}":\n{answer}')
-                        except Exception as e:
-                            print_lg(f"AI failed for textarea: {e}")
+                label_org = extract_question_label(Question, "Textarea Question")
+                label = label_org.lower()
 
-                    if not answer:
-                        answer = linkedin_summary
+                answer = ""
+                if 'summary' in label:
+                    answer = linkedin_summary
+                elif 'cover' in label:
+                    answer = cover_letter
+                else:
+                    answer = answer_resume_specific_question(label_org, "textarea")
 
-                    safe_fill_input(driver, text_area, str(answer))
+                # If empty, USE LLM!
+                if not answer and use_AI and aiClient:
+                    try:
+                        ai_resp = ask_llm(
+                            question=label_org,
+                            question_type='textarea',
+                            job_description=job_description
+                        )
+                        if ai_resp:
+                            answer = ai_resp
+                            print_lg(f'AI answered textarea question "{label_org}":\n{answer}')
+                    except Exception as e:
+                        print_lg(f"AI failed for textarea: {e}")
+
+                if not answer:
+                    answer = linkedin_summary
+
+                safe_fill_input(driver, text_area, str(answer))
 
                 questions_list.add((label, text_area.get_attribute("value"), "textarea", prev_answer))
                 continue
@@ -1662,131 +1732,136 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     continue
                 handled_controls.add(ctrl_id)
 
-                label_org = extract_question_label(Question, "Text Question")
-                label = label_org.lower()
-
                 prev_answer = text.get_attribute("value") or ""
                 if is_placeholder_answer(prev_answer):
                     prev_answer = ""
 
                 needs_answer = overwrite_previous_answers or not prev_answer
 
-                if needs_answer:
-                    answer = ""
-                    do_actions = False
+                # Fast skip if input is already filled
+                if not needs_answer:
+                    label_org = extract_question_label(Question, "Text Question")
+                    questions_list.add((label_org.lower(), prev_answer, "text", prev_answer))
+                    continue
 
-                    # 1. Exact fast paths
-                    if 'phone' in label or 'mobile' in label:
-                        answer = phone_number
-                    elif 'street' in label:
-                        answer = street
-                    elif 'city' in label or 'location' in label or 'address' in label:
-                        answer = current_city if current_city else work_location
-                        do_actions = True
-                    elif 'signature' in label or ('full' in label and 'name' in label):
-                        answer = full_name
-                    elif 'first' in label and 'name' in label and 'last' not in label:
-                        answer = first_name
-                    elif 'middle' in label and 'name' in label and 'last' not in label:
-                        answer = middle_name
-                    elif 'last' in label and 'name' in label and 'first' not in label:
-                        answer = last_name
-                    elif 'employer' in label or ('company' in label and ('current' in label or 'recent' in label)):
-                        answer = recent_employer
-                    elif 'linkedin' in label:
-                        answer = linkedIn
-                    elif 'website' in label or 'portfolio' in label or 'blog' in label:
-                        answer = website
-                    elif 'state' in label or 'province' in label:
-                        answer = state
-                    elif 'zip' in label or 'postal' in label or 'code' in label:
-                        answer = zipcode
-                    elif 'country' in label:
-                        answer = country
-                    elif 'notice' in label:
-                        if 'month' in label:
-                            answer = notice_period_months
-                        elif 'week' in label:
-                            answer = notice_period_weeks
-                        else:
-                            answer = notice_period
-                    elif 'salary' in label or 'ctc' in label or 'compensation' in label or 'pay' in label:
-                        if 'current' in label or 'present' in label:
-                            if 'month' in label:
-                                answer = current_ctc_monthly
-                            elif 'lakh' in label:
-                                answer = current_ctc_lakhs
-                            else:
-                                answer = current_ctc
-                        else:
-                            if 'month' in label:
-                                answer = desired_salary_monthly
-                            elif 'lakh' in label:
-                                answer = desired_salary_lakhs
-                            else:
-                                answer = desired_salary
-                    elif 'scale of 1-10' in label:
-                        answer = confidence_level
-                    elif 'headline' in label:
-                        answer = linkedin_headline
-                    elif ('hear' in label or 'come across' in label) and 'this' in label:
-                        answer = "LinkedIn"
+                label_org = extract_question_label(Question, "Text Question")
+                label = label_org.lower()
+
+                answer = ""
+                do_actions = False
+
+                # 1. Exact fast paths
+                if 'phone' in label or 'mobile' in label:
+                    answer = phone_number
+                elif 'street' in label:
+                    answer = street
+                elif 'city' in label or 'location' in label or 'address' in label:
+                    answer = current_city if current_city else work_location
+                    do_actions = True
+                elif 'signature' in label or ('full' in label and 'name' in label):
+                    answer = full_name
+                elif 'first' in label and 'name' in label and 'last' not in label:
+                    answer = first_name
+                elif 'middle' in label and 'name' in label and 'last' not in label:
+                    answer = middle_name
+                elif 'last' in label and 'name' in label and 'first' not in label:
+                    answer = last_name
+                elif 'employer' in label or ('company' in label and ('current' in label or 'recent' in label)):
+                    answer = recent_employer
+                elif 'linkedin' in label:
+                    answer = linkedIn
+                elif 'website' in label or 'portfolio' in label or 'blog' in label:
+                    answer = website
+                elif 'state' in label or 'province' in label:
+                    answer = state
+                elif 'zip' in label or 'postal' in label or 'code' in label:
+                    answer = zipcode
+                elif 'country' in label:
+                    answer = country
+                elif 'notice' in label:
+                    if 'month' in label:
+                        answer = notice_period_months
+                    elif 'week' in label:
+                        answer = notice_period_weeks
                     else:
-                        answer = answer_common_questions(label, "")
-
-                    # 2. Experience questions
-                    if ('experience' in label or 'years' in label) and not answer:
-                        matched_exp = answer_experience_question(label)
-                        if matched_exp and matched_exp != "":
-                            answer = matched_exp
+                        answer = notice_period
+                elif 'salary' in label or 'ctc' in label or 'compensation' in label or 'pay' in label:
+                    if 'current' in label or 'present' in label:
+                        if 'month' in label:
+                            answer = current_ctc_monthly
+                        elif 'lakh' in label:
+                            answer = current_ctc_lakhs
                         else:
-                            # Use LLM to accurately extract experience number from profile
-                            if use_AI and aiClient:
-                                try:
-                                    ai_resp = ask_llm(
-                                        question=label_org,
-                                        question_type='text',
-                                        job_description=job_description
-                                    )
-                                    m_num = re.search(r'\b\d+(\.\d+)?\b', ai_resp)
-                                    if m_num:
-                                        answer = m_num.group(0)
-                                        print_lg(f'AI answered experience question "{label_org}": {answer}')
-                                    elif ai_resp:
-                                        answer = ai_resp
-                                except Exception as e:
-                                    print_lg(f"AI failed for experience question: {e}")
+                            answer = current_ctc
+                    else:
+                        if 'month' in label:
+                            answer = desired_salary_monthly
+                        elif 'lakh' in label:
+                            answer = desired_salary_lakhs
+                        else:
+                            answer = desired_salary
+                elif 'scale of 1-10' in label:
+                    answer = confidence_level
+                elif 'headline' in label:
+                    answer = linkedin_headline
+                elif ('hear' in label or 'come across' in label) and 'this' in label:
+                    answer = "LinkedIn"
+                else:
+                    answer = answer_common_questions(label, "")
 
-                    # 3. Resume-specific custom questions
-                    if not answer:
-                        answer = answer_resume_specific_question(label_org, "text")
+                # 2. Experience questions
+                if ('experience' in label or 'years' in label) and not answer:
+                    matched_exp = answer_experience_question(label)
+                    if matched_exp and matched_exp != "":
+                        answer = matched_exp
+                    else:
+                        # Use LLM to accurately extract experience number from profile
+                        if use_AI and aiClient:
+                            try:
+                                ai_resp = ask_llm(
+                                    question=label_org,
+                                    question_type='text',
+                                    job_description=job_description
+                                )
+                                m_num = re.search(r'\b\d+(\.\d+)?\b', ai_resp)
+                                if m_num:
+                                    answer = m_num.group(0)
+                                    print_lg(f'AI answered experience question "{label_org}": {answer}')
+                                elif ai_resp:
+                                    answer = ai_resp
+                            except Exception as e:
+                                print_lg(f"AI failed for experience question: {e}")
 
-                    # 4. Fallback for any other unanswered field: USE LLM!
-                    if not answer and use_AI and aiClient:
-                        try:
-                            ai_resp = ask_llm(
-                                question=label_org,
-                                question_type='text',
-                                job_description=job_description
-                            )
-                            if ai_resp:
-                                answer = ai_resp
-                                print_lg(f'AI answered text question "{label_org}": {answer}')
-                        except Exception as e:
-                            print_lg(f"AI failed for text question: {e}")
+                # 3. Resume-specific custom questions
+                if not answer:
+                    answer = answer_resume_specific_question(label_org, "text")
 
-                    # 5. Final fallback
-                    if not answer:
-                        answer = years_of_experience
+                # 4. Fallback for any other unanswered field: USE LLM!
+                if not answer and use_AI and aiClient:
+                    try:
+                        ai_resp = ask_llm(
+                            question=label_org,
+                            question_type='text',
+                            job_description=job_description
+                        )
+                        if ai_resp:
+                            answer = ai_resp
+                            print_lg(f'AI answered text question "{label_org}": {answer}')
+                    except Exception as e:
+                        print_lg(f"AI failed for text question: {e}")
 
-                    safe_fill_input(driver, text, str(answer))
+                # 5. Final fallback
+                if not answer:
+                    answer = years_of_experience
 
-                    if do_actions:
-                        try:
-                            sleep(0.5)
-                            actions.send_keys(Keys.ARROW_DOWN).send_keys(Keys.ENTER).perform()
-                        except Exception:
-                            pass
+                safe_fill_input(driver, text, str(answer))
+
+                if do_actions:
+                    try:
+                        sleep(0.5)
+                        actions.send_keys(Keys.ARROW_DOWN).send_keys(Keys.ENTER).perform()
+                    except Exception:
+                        pass
 
                 questions_list.add((label, text.get_attribute("value"), "text", prev_answer))
                 continue
@@ -1807,8 +1882,6 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     continue
                 handled_controls.add(ctrl_id)
 
-                label_org = extract_question_label(Question, "Checkbox")
-                label = label_org.lower()
                 prev_answer = checkbox.is_selected()
                 checked = prev_answer
 
@@ -1824,6 +1897,8 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                         except Exception:
                             pass
 
+                label_org = extract_question_label(Question, "Checkbox")
+                label = label_org.lower()
                 questions_list.add((label, checked, "checkbox", prev_answer))
                 continue
 
